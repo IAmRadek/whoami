@@ -44,6 +44,8 @@ fn main() {
     let mut pending: Option<agent::Pick> = None;
     let mut error: Option<&str> = None;
     let mut last: Option<(Vec<u8>, Instant)> = None;
+    // key blobs, most recently chosen first
+    let mut recent: Vec<Vec<u8>> = Vec::new();
     let mut selected = 0;
     let mut progress = Vec::new();
 
@@ -70,6 +72,10 @@ fn main() {
                             rl.clear_window_state(WindowState::default().set_window_hidden(true));
                             rl.set_window_focused();
                             error = None;
+                            // stable sort: keys never chosen keep the upstream order, after the used ones
+                            pick.identities.sort_by_key(|i| {
+                                recent.iter().position(|k| k == &i.key_blob).unwrap_or(usize::MAX)
+                            });
                             selected = 0;
                             progress = vec![0.0f32; pick.identities.len()];
                             pending = Some(pick);
@@ -86,6 +92,8 @@ fn main() {
                 let identity = enter.then(|| pick.identities.swap_remove(selected));
                 if let Some(identity) = &identity {
                     last = Some((identity.key_blob.clone(), Instant::now()));
+                    recent.retain(|k| k != &identity.key_blob);
+                    recent.insert(0, identity.key_blob.clone());
                 }
                 let _ = pick.reply.send(identity);
             }
