@@ -16,7 +16,9 @@ fn main() {
         .unwrap_or_else(|_| std::env::temp_dir().join("whoami.sock"));
     let listener = agent::listen(&socket).expect("bind agent socket");
     eprintln!("whoami: listening on {}", socket.display());
-    std::thread::spawn(move || agent::serve(listener, upstream));
+    let chosen = std::sync::Arc::new(std::sync::Mutex::new(identities[0].key_blob.clone()));
+    let proxy_chosen = chosen.clone();
+    std::thread::spawn(move || agent::serve(listener, upstream, proxy_chosen));
 
     let (mut rl, thread) = raylib::init()
         .resizable()
@@ -42,6 +44,7 @@ fn main() {
 
         if rl.is_key_pressed(KeyboardKey::KEY_TAB) {
             selected = (selected + 1) % n;
+            *chosen.lock().unwrap() = identities[selected].key_blob.clone();
         }
 
         let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
