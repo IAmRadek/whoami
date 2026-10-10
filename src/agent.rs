@@ -22,7 +22,13 @@ pub struct Pick {
     pub reply: mpsc::Sender<Option<Identity>>,
 }
 
-pub fn serve(listener: UnixListener, upstream: String, picks: mpsc::Sender<Pick>) {
+// DRAFT: what the proxy asks of the UI
+pub enum Request {
+    Pick(Pick),
+    Unavailable,
+}
+
+pub fn serve(listener: UnixListener, upstream: String, picks: mpsc::Sender<Request>) {
     for client in listener.incoming() {
         let upstream = upstream.clone();
         let picks = picks.clone();
@@ -41,8 +47,14 @@ pub fn serve(listener: UnixListener, upstream: String, picks: mpsc::Sender<Pick>
 
 // the agent protocol is strict request/reply, so one frame in, one frame out
 // DRAFT policy: list only the chosen key, refuse signing with any other, pass everything else through
-fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Pick>) -> io::Result<()> {
-    let mut upstream = UnixStream::connect(upstream)?;
+fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) -> io::Result<()> {
+    let mut upstream = match UnixStream::connect(upstream) {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ = picks.send(Request::Unavailable);
+            return Err(e);
+        }
+    };
     let mut chosen: Option<Vec<u8>> = None;
     while let Some(request) = read_frame(&mut client)? {
         let kind = request.first().copied();
@@ -62,7 +74,7 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Pick>) -> 
             } else {
                 let (tx, rx) = mpsc::channel();
                 picks
-                    .send(Pick { identities, reply: tx })
+                    .send(Request::Pick(Pick { identities, reply: tx }))
                     .map_err(|_| io::Error::other("ui is gone"))?;
                 match rx.recv().map_err(|_| io::Error::other("ui is gone"))? {
                     Some(identity) => {

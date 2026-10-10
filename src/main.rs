@@ -42,6 +42,7 @@ fn main() {
     );
 
     let mut pending: Option<agent::Pick> = None;
+    let mut error: Option<&str> = None;
     let mut last: Option<(Vec<u8>, Instant)> = None;
     let mut selected = 0;
     let mut progress = Vec::new();
@@ -50,23 +51,32 @@ fn main() {
         let dt = rl.get_frame_time();
 
         if pending.is_none() {
-            if let Ok(mut pick) = picks.try_recv() {
-                let remembered = last
-                    .as_ref()
-                    .filter(|(_, at)| at.elapsed() < REMEMBER)
-                    .and_then(|(key, _)| pick.identities.iter().position(|i| &i.key_blob == key));
-                match remembered {
-                    Some(i) => {
-                        let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
-                    }
-                    None => {
-                        rl.clear_window_state(WindowState::default().set_window_hidden(true));
-                        rl.set_window_focused();
-                        selected = 0;
-                        progress = vec![0.0f32; pick.identities.len()];
-                        pending = Some(pick);
+            match picks.try_recv() {
+                Ok(agent::Request::Unavailable) => {
+                    rl.clear_window_state(WindowState::default().set_window_hidden(true));
+                    rl.set_window_focused();
+                    error = Some("ssh-agent not available");
+                }
+                Ok(agent::Request::Pick(mut pick)) => {
+                    let remembered = last
+                        .as_ref()
+                        .filter(|(_, at)| at.elapsed() < REMEMBER)
+                        .and_then(|(key, _)| pick.identities.iter().position(|i| &i.key_blob == key));
+                    match remembered {
+                        Some(i) => {
+                            let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
+                        }
+                        None => {
+                            rl.clear_window_state(WindowState::default().set_window_hidden(true));
+                            rl.set_window_focused();
+                            error = None;
+                            selected = 0;
+                            progress = vec![0.0f32; pick.identities.len()];
+                            pending = Some(pick);
+                        }
                     }
                 }
+                Err(_) => {}
             }
         }
 
@@ -79,8 +89,27 @@ fn main() {
                 }
                 let _ = pick.reply.send(identity);
             }
+            error = None;
             rl.set_window_state(WindowState::default().set_window_hidden(true));
             macos::hide();
+        }
+
+        if let Some(message) = error {
+            let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
+            let size = sh * 0.1;
+            let text_w = rl.measure_text(message, size as i32) as f32;
+            let mut d = rl.begin_drawing(&thread);
+            d.clear_background(Color::TRANSPARENT);
+            let pill = Rectangle::new((sw - text_w) / 2.0 - size, (sh - 3.0 * size) / 2.0, text_w + 2.0 * size, 3.0 * size);
+            d.draw_rectangle_rounded(pill, 0.3, 16, Color::new(10, 12, 10, 255));
+            d.draw_text(
+                message,
+                ((sw - text_w) / 2.0) as i32,
+                ((sh - size) / 2.0) as i32,
+                size as i32,
+                Color::new(255, 85, 85, 255),
+            );
+            continue;
         }
 
         let Some(pick) = &pending else {
