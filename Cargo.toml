@@ -3,5 +3,10 @@ name = "whoami"
 version = "0.1.0"
 edition = "2024"
 
+# `whoami` would shadow /usr/bin/whoami once installed
+[[bin]]
+name = "whoami-agent"
+path = "src/main.rs"
+
 [dependencies]
 raylib = { version = "6.0.0" }
