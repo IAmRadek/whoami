@@ -1,8 +1,16 @@
 use raylib::ffi::CSSPalette;
 use raylib::prelude::*;
 
+mod agent;
+
 fn main() {
-    //.topmost().borderless_windowed_mode().undecorated()
+    let upstream = std::env::var("WHOAMI_UPSTREAM")
+        .or_else(|_| std::env::var("SSH_AUTH_SOCK"))
+        .expect("set WHOAMI_UPSTREAM or SSH_AUTH_SOCK");
+    let identities = agent::list_identities(&upstream).expect("list identities");
+    let n = identities.len();
+    assert!(n > 0, "agent has no identities");
+
     let (mut rl, thread) = raylib::init()
         .resizable()
         .transparent()
@@ -20,13 +28,13 @@ fn main() {
     );
 
     let mut selected = 0;
-    let mut progress = [0.0f32; 3];
+    let mut progress = vec![0.0f32; n];
 
     while !rl.window_should_close() {
         let dt = rl.get_frame_time();
 
         if rl.is_key_pressed(KeyboardKey::KEY_TAB) {
-            selected = (selected + 1) % 3;
+            selected = (selected + 1) % n;
         }
 
         let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
@@ -34,7 +42,7 @@ fn main() {
         let h = (sh - header) * 0.6;
         let w = h * 1.25;
         let gap = w * 0.2;
-        let x0 = (sw - (3.0 * w + 2.0 * gap)) / 2.0;
+        let x0 = (sw - (n as f32 * w + (n - 1) as f32 * gap)) / 2.0;
         let y = header + (sh - header - h) / 2.0;
 
         let title = "SELECT SSH KEY";
@@ -44,7 +52,7 @@ fn main() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::TRANSPARENT);
         // roundness is relative to the shorter side, so scale it to match the cards' corner radius
-        let panel_w = 4.0 * w + 4.0 * gap;
+        let panel_w = (n + 1) as f32 * (w + gap);
         let panel = Rectangle::new((sw - panel_w) / 2.0, 0.0, panel_w, sh);
         d.draw_rectangle_rounded(panel, 0.08 * h / sh, 16, Color::new(10, 12, 10, 255));
         d.draw_text(
@@ -55,7 +63,7 @@ fn main() {
             Color::new(51, 255, 102, 255),
         );
 
-        for i in 0..3 {
+        for (i, identity) in identities.iter().enumerate() {
             let mut rec = Rectangle::new(x0 + i as f32 * (w + gap), y, w, h);
 
             let dir = if i == selected { 1.0 } else { -1.0 };
@@ -74,7 +82,23 @@ fn main() {
             rec.height *= scale;
 
             d.draw_rectangle_rounded(rec, 0.08, 16, Color::new(18, 24, 18, 255));
-            d.draw_rectangle_rounded_lines_ex(rec, 0.08, 16, 2.0, Color::new(51, 255, 102, (255.0 * eased) as u8));
+            d.draw_rectangle_rounded_lines_ex(
+                rec,
+                0.08,
+                16,
+                2.0,
+                Color::new(51, 255, 102, (255.0 * eased) as u8),
+            );
+
+            let label_size = (h * 0.12) as i32;
+            let label_w = d.measure_text(&identity.comment, label_size) as f32;
+            d.draw_text(
+                &identity.comment,
+                (rec.x + (rec.width - label_w) / 2.0) as i32,
+                (rec.y + (rec.height - label_size as f32) / 2.0) as i32,
+                label_size,
+                Color::new(51, 255, 102, 255),
+            );
         }
     }
 }
