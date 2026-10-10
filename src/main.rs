@@ -1,33 +1,37 @@
 use raylib::ffi::CSSPalette;
 use raylib::prelude::*;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 mod agent;
+mod macos;
+
+// one `git push` can open several agent connections; reuse a fresh choice for them
+const REMEMBER: Duration = Duration::from_secs(1);
 
 fn main() {
     let upstream = std::env::var("WHOAMI_UPSTREAM")
         .or_else(|_| std::env::var("SSH_AUTH_SOCK"))
         .expect("set WHOAMI_UPSTREAM or SSH_AUTH_SOCK");
-    let identities = agent::list_identities(&upstream).expect("list identities");
-    let n = identities.len();
-    assert!(n > 0, "agent has no identities");
 
     let socket = std::env::var("WHOAMI_SOCKET")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir().join("whoami.sock"));
     let listener = agent::listen(&socket).expect("bind agent socket");
     eprintln!("whoami: listening on {}", socket.display());
-    let chosen = std::sync::Arc::new(std::sync::Mutex::new(identities[0].key_blob.clone()));
-    let proxy_chosen = chosen.clone();
-    std::thread::spawn(move || agent::serve(listener, upstream, proxy_chosen));
+    let (pick_tx, picks) = mpsc::channel();
+    std::thread::spawn(move || agent::serve(listener, upstream, pick_tx));
 
     let (mut rl, thread) = raylib::init()
         .resizable()
         .transparent()
         .borderless_windowed_mode()
         .undecorated()
+        .hidden()
         .highdpi()
         .topmost()
         .build();
+    macos::set_accessory();
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 260);
     rl.set_window_size(width, height);
@@ -36,15 +40,55 @@ fn main() {
         (get_monitor_height(monitor) - height) / 2,
     );
 
+    let mut pending: Option<agent::Pick> = None;
+    let mut last: Option<(Vec<u8>, Instant)> = None;
     let mut selected = 0;
-    let mut progress = vec![0.0f32; n];
+    let mut progress = Vec::new();
 
     while !rl.window_should_close() {
         let dt = rl.get_frame_time();
 
+        if pending.is_none() {
+            if let Ok(mut pick) = picks.try_recv() {
+                let remembered = last
+                    .as_ref()
+                    .filter(|(_, at)| at.elapsed() < REMEMBER)
+                    .and_then(|(key, _)| pick.identities.iter().position(|i| &i.key_blob == key));
+                match remembered {
+                    Some(i) => {
+                        let _ = pick.reply.send(pick.identities.swap_remove(i));
+                    }
+                    None => {
+                        rl.clear_window_state(WindowState::default().set_window_hidden(true));
+                        rl.set_window_focused();
+                        selected = 0;
+                        progress = vec![0.0f32; pick.identities.len()];
+                        pending = Some(pick);
+                    }
+                }
+            }
+        }
+
+        if rl.is_key_pressed(KeyboardKey::KEY_ENTER) {
+            if let Some(mut pick) = pending.take() {
+                let identity = pick.identities.swap_remove(selected);
+                last = Some((identity.key_blob.clone(), Instant::now()));
+                let _ = pick.reply.send(identity);
+            }
+            rl.set_window_state(WindowState::default().set_window_hidden(true));
+            macos::hide();
+        }
+
+        let Some(pick) = &pending else {
+            rl.begin_drawing(&thread)
+                .clear_background(Color::TRANSPARENT);
+            continue;
+        };
+        let identities = &pick.identities;
+        let n = identities.len();
+
         if rl.is_key_pressed(KeyboardKey::KEY_TAB) {
             selected = (selected + 1) % n;
-            *chosen.lock().unwrap() = identities[selected].key_blob.clone();
         }
 
         let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);

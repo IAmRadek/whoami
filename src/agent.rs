@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::thread;
 
 const FAILURE: u8 = 5;
@@ -16,14 +16,20 @@ pub fn listen(socket: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(socket)
 }
 
-pub fn serve(listener: UnixListener, upstream: String, chosen: Arc<Mutex<Vec<u8>>>) {
+// a key list waiting for the user; the UI answers on `reply` with the chosen identity
+pub struct Pick {
+    pub identities: Vec<Identity>,
+    pub reply: mpsc::Sender<Identity>,
+}
+
+pub fn serve(listener: UnixListener, upstream: String, picks: mpsc::Sender<Pick>) {
     for client in listener.incoming() {
         let upstream = upstream.clone();
-        let chosen = chosen.clone();
+        let picks = picks.clone();
         match client {
             Ok(client) => {
                 thread::spawn(move || {
-                    if let Err(e) = proxy(client, &upstream, &chosen) {
+                    if let Err(e) = proxy(client, &upstream, &picks) {
                         eprintln!("whoami: client: {e}");
                     }
                 });
@@ -35,21 +41,33 @@ pub fn serve(listener: UnixListener, upstream: String, chosen: Arc<Mutex<Vec<u8>
 
 // the agent protocol is strict request/reply, so one frame in, one frame out
 // DRAFT policy: list only the chosen key, refuse signing with any other, pass everything else through
-fn proxy(mut client: UnixStream, upstream: &str, chosen: &Mutex<Vec<u8>>) -> io::Result<()> {
+fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Pick>) -> io::Result<()> {
     let mut upstream = UnixStream::connect(upstream)?;
+    let mut chosen: Option<Vec<u8>> = None;
     while let Some(request) = read_frame(&mut client)? {
         let kind = request.first().copied();
         let reply = if kind == Some(SIGN_REQUEST)
-            && take_string(&mut &request[1..])? != chosen.lock().unwrap().as_slice()
+            && chosen.as_deref() != Some(take_string(&mut &request[1..])?)
         {
             vec![FAILURE]
         } else {
             write_frame(&mut upstream, &request)?;
             let reply = read_frame(&mut upstream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
-            if kind == Some(REQUEST_IDENTITIES) {
-                only_chosen(&reply, &chosen.lock().unwrap())?
-            } else {
+            let identities = match kind {
+                Some(REQUEST_IDENTITIES) => parse_identities(&reply)?,
+                _ => Vec::new(),
+            };
+            if identities.is_empty() {
                 reply
+            } else {
+                let (tx, rx) = mpsc::channel();
+                picks
+                    .send(Pick { identities, reply: tx })
+                    .map_err(|_| io::Error::other("ui is gone"))?;
+                let identity = rx.recv().map_err(|_| io::Error::other("ui is gone"))?;
+                let answer = identities_answer(&identity);
+                chosen = Some(identity.key_blob);
+                answer
             }
         };
         write_frame(&mut client, &reply)?;
@@ -57,16 +75,12 @@ fn proxy(mut client: UnixStream, upstream: &str, chosen: &Mutex<Vec<u8>>) -> io:
     Ok(())
 }
 
-fn only_chosen(answer: &[u8], chosen: &[u8]) -> io::Result<Vec<u8>> {
-    let identities = parse_identities(answer)?;
-    let kept: Vec<_> = identities.iter().filter(|i| i.key_blob == chosen).collect();
+fn identities_answer(identity: &Identity) -> Vec<u8> {
     let mut out = vec![IDENTITIES_ANSWER];
-    out.extend((kept.len() as u32).to_be_bytes());
-    for identity in kept {
-        put_string(&mut out, &identity.key_blob);
-        put_string(&mut out, identity.comment.as_bytes());
-    }
-    Ok(out)
+    out.extend(1u32.to_be_bytes());
+    put_string(&mut out, &identity.key_blob);
+    put_string(&mut out, identity.comment.as_bytes());
+    out
 }
 
 // None when the peer closed the connection between frames
@@ -94,17 +108,6 @@ fn write_frame(stream: &mut UnixStream, body: &[u8]) -> io::Result<()> {
 pub struct Identity {
     pub key_blob: Vec<u8>,
     pub comment: String,
-}
-
-pub fn list_identities(socket: &str) -> io::Result<Vec<Identity>> {
-    let mut stream = UnixStream::connect(socket)?;
-    stream.write_all(&[0, 0, 0, 1, REQUEST_IDENTITIES])?;
-
-    let mut len = [0; 4];
-    stream.read_exact(&mut len)?;
-    let mut body = vec![0; u32::from_be_bytes(len) as usize];
-    stream.read_exact(&mut body)?;
-    parse_identities(&body)
 }
 
 fn parse_identities(body: &[u8]) -> io::Result<Vec<Identity>> {
