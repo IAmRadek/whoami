@@ -11,6 +11,13 @@ fn main() {
     let n = identities.len();
     assert!(n > 0, "agent has no identities");
 
+    let socket = std::env::var("WHOAMI_SOCKET")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("whoami.sock"));
+    let listener = agent::listen(&socket).expect("bind agent socket");
+    eprintln!("whoami: listening on {}", socket.display());
+    std::thread::spawn(move || agent::serve(listener, upstream));
+
     let (mut rl, thread) = raylib::init()
         .resizable()
         .transparent()
