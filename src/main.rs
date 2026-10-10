@@ -32,6 +32,7 @@ fn main() {
         .topmost()
         .build();
     macos::set_accessory();
+    rl.set_exit_key(None);
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 260);
     rl.set_window_size(width, height);
@@ -56,7 +57,7 @@ fn main() {
                     .and_then(|(key, _)| pick.identities.iter().position(|i| &i.key_blob == key));
                 match remembered {
                     Some(i) => {
-                        let _ = pick.reply.send(pick.identities.swap_remove(i));
+                        let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
                     }
                     None => {
                         rl.clear_window_state(WindowState::default().set_window_hidden(true));
@@ -69,10 +70,13 @@ fn main() {
             }
         }
 
-        if rl.is_key_pressed(KeyboardKey::KEY_ENTER) {
+        let enter = rl.is_key_pressed(KeyboardKey::KEY_ENTER);
+        if enter || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
             if let Some(mut pick) = pending.take() {
-                let identity = pick.identities.swap_remove(selected);
-                last = Some((identity.key_blob.clone(), Instant::now()));
+                let identity = enter.then(|| pick.identities.swap_remove(selected));
+                if let Some(identity) = &identity {
+                    last = Some((identity.key_blob.clone(), Instant::now()));
+                }
                 let _ = pick.reply.send(identity);
             }
             rl.set_window_state(WindowState::default().set_window_hidden(true));

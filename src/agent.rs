@@ -16,10 +16,10 @@ pub fn listen(socket: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(socket)
 }
 
-// a key list waiting for the user; the UI answers on `reply` with the chosen identity
+// a key list waiting for the user; the UI answers on `reply` with the chosen identity, or None on cancel
 pub struct Pick {
     pub identities: Vec<Identity>,
-    pub reply: mpsc::Sender<Identity>,
+    pub reply: mpsc::Sender<Option<Identity>>,
 }
 
 pub fn serve(listener: UnixListener, upstream: String, picks: mpsc::Sender<Pick>) {
@@ -64,10 +64,15 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Pick>) -> 
                 picks
                     .send(Pick { identities, reply: tx })
                     .map_err(|_| io::Error::other("ui is gone"))?;
-                let identity = rx.recv().map_err(|_| io::Error::other("ui is gone"))?;
-                let answer = identities_answer(&identity);
-                chosen = Some(identity.key_blob);
-                answer
+                match rx.recv().map_err(|_| io::Error::other("ui is gone"))? {
+                    Some(identity) => {
+                        let answer = identities_answer(&identity);
+                        chosen = Some(identity.key_blob);
+                        answer
+                    }
+                    // DRAFT: a cancel looks like an agent with no keys
+                    None => vec![IDENTITIES_ANSWER, 0, 0, 0, 0],
+                }
             }
         };
         write_frame(&mut client, &reply)?;
