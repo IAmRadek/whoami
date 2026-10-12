@@ -7,7 +7,7 @@ mod agent;
 mod macos;
 
 // one `git push` can open several agent connections; reuse a fresh choice for them
-const REMEMBER: Duration = Duration::from_secs(1);
+const REMEMBER: Duration = Duration::from_secs(10);
 
 fn main() {
     let upstream = std::env::var("WHOAMI_UPSTREAM")
@@ -63,7 +63,9 @@ fn main() {
                     let remembered = last
                         .as_ref()
                         .filter(|(_, at)| at.elapsed() < REMEMBER)
-                        .and_then(|(key, _)| pick.identities.iter().position(|i| &i.key_blob == key));
+                        .and_then(|(key, _)| {
+                            pick.identities.iter().position(|i| &i.key_blob == key)
+                        });
                     match remembered {
                         Some(i) => {
                             let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
@@ -74,7 +76,10 @@ fn main() {
                             error = None;
                             // stable sort: keys never chosen keep the upstream order, after the used ones
                             pick.identities.sort_by_key(|i| {
-                                recent.iter().position(|k| k == &i.key_blob).unwrap_or(usize::MAX)
+                                recent
+                                    .iter()
+                                    .position(|k| k == &i.key_blob)
+                                    .unwrap_or(usize::MAX)
                             });
                             selected = 0;
                             progress = vec![0.0f32; pick.identities.len()];
@@ -108,7 +113,12 @@ fn main() {
             let text_w = rl.measure_text(message, size as i32) as f32;
             let mut d = rl.begin_drawing(&thread);
             d.clear_background(Color::TRANSPARENT);
-            let pill = Rectangle::new((sw - text_w) / 2.0 - size, (sh - 3.0 * size) / 2.0, text_w + 2.0 * size, 3.0 * size);
+            let pill = Rectangle::new(
+                (sw - text_w) / 2.0 - size,
+                (sh - 3.0 * size) / 2.0,
+                text_w + 2.0 * size,
+                3.0 * size,
+            );
             d.draw_rectangle_rounded(pill, 0.3, 16, Color::new(10, 12, 10, 255));
             d.draw_text(
                 message,
