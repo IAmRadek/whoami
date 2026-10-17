@@ -48,6 +48,8 @@ fn main() {
     // key blobs, most recently chosen first
     let mut recent: Vec<Vec<u8>> = Vec::new();
     let mut selected = 0;
+    // set where the cards are drawn and confirmed on the next frame
+    let mut clicked = false;
     let mut progress = Vec::new();
 
     while !rl.window_should_close() {
@@ -92,7 +94,7 @@ fn main() {
             }
         }
 
-        let enter = rl.is_key_pressed(KeyboardKey::KEY_ENTER);
+        let enter = rl.is_key_pressed(KeyboardKey::KEY_ENTER) || std::mem::take(&mut clicked);
         if enter || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
             if let Some(mut pick) = pending.take() {
                 let identity = enter.then(|| pick.identities.swap_remove(selected));
@@ -139,9 +141,17 @@ fn main() {
         let identities = &pick.identities;
         let n = identities.len();
 
-        if rl.is_key_pressed(KeyboardKey::KEY_TAB) {
+        if rl.is_key_pressed(KeyboardKey::KEY_TAB) || rl.is_key_pressed(KeyboardKey::KEY_RIGHT) {
             selected = (selected + 1) % n;
         }
+        if rl.is_key_pressed(KeyboardKey::KEY_LEFT) {
+            selected = (selected + n - 1) % n;
+        }
+        let mouse = rl.get_mouse_position();
+        let delta = rl.get_mouse_delta();
+        // a resting cursor leaves the keyboard highlight alone
+        let moved = delta.x != 0.0 || delta.y != 0.0;
+        let click = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
 
         let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
         let header = sh * 0.25;
@@ -186,6 +196,15 @@ fn main() {
             rec.y -= h * (scale - 1.0) / 2.0;
             rec.width *= scale;
             rec.height *= scale;
+
+            let over = (rec.x..rec.x + rec.width).contains(&mouse.x)
+                && (rec.y..rec.y + rec.height).contains(&mouse.y);
+            if over && (moved || click) {
+                selected = i;
+            }
+            if over && click {
+                clicked = true;
+            }
 
             d.draw_rectangle_rounded(rec, 0.08, 16, Color::new(18, 24, 18, 255));
             d.draw_rectangle_rounded_lines_ex(
