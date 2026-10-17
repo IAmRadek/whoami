@@ -34,6 +34,7 @@ fn main() {
     macos::set_accessory();
     unsafe { macos::move_to_active_space(rl.get_window_handle()) };
     rl.set_exit_key(None);
+    rl.set_target_fps(60);
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 260);
     rl.set_window_size(width, height);
@@ -53,10 +54,19 @@ fn main() {
     let mut progress = Vec::new();
 
     while !rl.window_should_close() {
-        let dt = rl.get_frame_time();
+        // the first frames after a wait for the proxy report the whole wait
+        let dt = rl.get_frame_time().min(1.0 / 30.0);
 
         if pending.is_none() {
-            match picks.try_recv() {
+            let request = match error {
+                // nothing is on screen, so draw no frames until the proxy asks for something
+                None => match picks.recv() {
+                    Ok(request) => Ok(request),
+                    Err(_) => break,
+                },
+                Some(_) => picks.try_recv(),
+            };
+            match request {
                 Ok(agent::Request::Unavailable) => {
                     rl.clear_window_state(WindowState::default().set_window_hidden(true));
                     rl.set_window_focused();
