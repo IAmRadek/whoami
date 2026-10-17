@@ -74,7 +74,10 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
             } else {
                 let (tx, rx) = mpsc::channel();
                 picks
-                    .send(Request::Pick(Pick { identities, reply: tx }))
+                    .send(Request::Pick(Pick {
+                        identities,
+                        reply: tx,
+                    }))
                     .map_err(|_| io::Error::other("ui is gone"))?;
                 match rx.recv().map_err(|_| io::Error::other("ui is gone"))? {
                     Some(identity) => {

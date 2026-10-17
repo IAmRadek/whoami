@@ -23,11 +23,11 @@ unsafe fn app() -> Id {
     }
 }
 
-// both messages below take one word-sized argument: an NSInteger or an object pointer
-unsafe fn send(selector: &CStr, arg: isize) {
+// the messages below take one word-sized argument: an NSInteger, an NSUInteger or an object pointer
+unsafe fn send(receiver: Id, selector: &CStr, arg: isize) {
     let f: unsafe extern "C" fn(Id, Id, isize) =
         unsafe { transmute(objc_msgSend as unsafe extern "C" fn()) };
-    unsafe { f(app(), sel_registerName(selector.as_ptr()), arg) }
+    unsafe { f(receiver, sel_registerName(selector.as_ptr()), arg) }
 }
 
 // no Dock icon and no menu bar; call after raylib init, which sets the policy to regular
@@ -35,6 +35,7 @@ pub fn set_accessory() {
     const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
     unsafe {
         send(
+            app(),
             c"setActivationPolicy:",
             NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
         )
@@ -43,5 +44,21 @@ pub fn set_accessory() {
 
 // hides the app and gives focus back to the previously active app; 0 is a nil sender
 pub fn hide() {
-    unsafe { send(c"hide:", 0) }
+    unsafe { send(app(), c"hide:", 0) }
+}
+
+// shows the window on the active Space; by default it stays on the Space it was created on,
+// and activating the app switches to that Space
+//
+// # Safety
+// `window` must be a live NSWindow, such as raylib's `get_window_handle` returns on macOS
+pub unsafe fn move_to_active_space(window: *mut c_void) {
+    const NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE: isize = 1 << 1;
+    unsafe {
+        send(
+            window,
+            c"setCollectionBehavior:",
+            NS_WINDOW_COLLECTION_BEHAVIOR_MOVE_TO_ACTIVE_SPACE,
+        )
+    }
 }

@@ -32,6 +32,7 @@ fn main() {
         .topmost()
         .build();
     macos::set_accessory();
+    unsafe { macos::move_to_active_space(rl.get_window_handle()) };
     rl.set_exit_key(None);
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 260);
