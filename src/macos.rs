@@ -1,6 +1,7 @@
 // AppKit calls raylib does not expose, sent through the Objective-C runtime.
 // objc_msgSend must be cast to the exact signature of each message before calling it.
 use std::ffi::{CStr, OsStr, c_void};
+use std::io;
 use std::mem::transmute;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -44,6 +45,7 @@ pub fn peer_cwd(socket: &UnixStream) -> Option<PathBuf> {
         )
     };
     if r != 0 {
+        eprintln!("whoami: LOCAL_PEERPID: {}", io::Error::last_os_error());
         return None;
     }
     let mut info = [0u8; SIZE];
@@ -57,10 +59,16 @@ pub fn peer_cwd(socket: &UnixStream) -> Option<PathBuf> {
         )
     };
     if n as usize != SIZE {
+        eprintln!(
+            "whoami: proc_pidinfo for pid {pid} returned {n} of {SIZE} bytes: {}",
+            io::Error::last_os_error()
+        );
         return None;
     }
     let path = CStr::from_bytes_until_nul(&info[PATH_OFFSET..PATH_OFFSET + MAXPATHLEN]).ok()?;
-    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+    let path = PathBuf::from(OsStr::from_bytes(path.to_bytes()));
+    eprintln!("whoami: client pid {pid} in {}", path.display());
+    Some(path)
 }
 
 unsafe fn app() -> Id {

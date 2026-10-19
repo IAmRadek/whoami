@@ -13,25 +13,52 @@ mod macos;
 const REMEMBER: Duration = Duration::from_secs(10);
 
 // the key for a directory, from `<directory prefix>=<key>` lines in ~/.ssh/whoami.cfg;
-// the longest matching prefix wins
+// the longest matching prefix wins, and the last of equal ones
 fn rule_for(cwd: &Path) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let config = std::fs::read_to_string(Path::new(&home).join(".ssh/whoami.cfg")).ok()?;
+    let Ok(home) = std::env::var("HOME") else {
+        eprintln!("whoami: rules: HOME is not set");
+        return None;
+    };
+    let path = Path::new(&home).join(".ssh/whoami.cfg");
+    let config = match std::fs::read_to_string(&path) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("whoami: rules: {}: {e}", path.display());
+            return None;
+        }
+    };
+    eprintln!("whoami: rules: {} for {}", path.display(), cwd.display());
     let cwd = cwd.as_os_str().as_bytes();
-    config
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(dir, key)| {
-            let dir = dir.trim();
-            let dir = match dir.strip_prefix('~') {
-                Some(rest) => format!("{home}{rest}"),
-                None => dir.to_string(),
-            };
-            (dir, key.trim())
-        })
-        .filter(|(dir, _)| cwd.starts_with(dir.as_bytes()))
-        .max_by_key(|(dir, _)| dir.len())
-        .map(|(_, key)| key.to_string())
+    let mut best: Option<(String, &str)> = None;
+    for (n, line) in config.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((dir, key)) = line.split_once('=') else {
+            eprintln!("whoami: rules: line {}: no '=', skipped: {line:?}", n + 1);
+            continue;
+        };
+        let dir = dir.trim();
+        let dir = match dir.strip_prefix('~') {
+            Some(rest) => format!("{home}{rest}"),
+            None => dir.to_string(),
+        };
+        let key = key.trim();
+        let matches = cwd.starts_with(dir.as_bytes());
+        eprintln!(
+            "whoami: rules: line {}: {dir:?} = {key:?}{}",
+            n + 1,
+            if matches { ", matches" } else { "" }
+        );
+        if matches && best.as_ref().is_none_or(|(b, _)| dir.len() >= b.len()) {
+            best = Some((dir, key));
+        }
+    }
+    match &best {
+        Some((dir, key)) => eprintln!("whoami: rules: {dir:?} chooses {key:?}"),
+        None => eprintln!("whoami: rules: no rule matches"),
+    }
+    best.map(|(_, key)| key.to_string())
 }
 
 // a rule names a key by its fingerprint, as `ssh-add -l` prints it, or else by its comment
@@ -121,7 +148,14 @@ fn main() {
                 }
                 Ok(agent::Request::Pick(mut pick)) => {
                     let ruled = pick.cwd.as_deref().and_then(rule_for).and_then(|key| {
-                        pick.identities.iter().position(|i| names(&key, i))
+                        let found = pick.identities.iter().position(|i| names(&key, i));
+                        if found.is_none() {
+                            eprintln!("whoami: rules: the agent has no key {key:?}, only:");
+                            for i in &pick.identities {
+                                eprintln!("whoami:   {} {}", fingerprint(&i.key_blob), i.comment);
+                            }
+                        }
+                        found
                     });
                     let remembered = last
                         .as_ref()
@@ -131,9 +165,12 @@ fn main() {
                         });
                     match ruled.or(remembered) {
                         Some(i) => {
+                            let how = if ruled.is_some() { "rule" } else { "last choice" };
+                            eprintln!("whoami: offers {:?} by {how}", pick.identities[i].comment);
                             let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
                         }
                         None => {
+                            eprintln!("whoami: shows the picker");
                             rl.clear_window_state(WindowState::default().set_window_hidden(true));
                             rl.set_window_focused();
                             error = None;

@@ -60,6 +60,12 @@
               example = "/Users/me/.ssh/whoami.sock";
               description = "Socket whoami listens on; SSH_AUTH_SOCK points here.";
             };
+            log = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "/Users/me/Library/Logs/whoami.log";
+              description = "File that receives whoami's diagnostics on stderr.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -71,7 +77,8 @@
               };
               RunAtLoad = true;
               KeepAlive = true;
-            };
+            }
+            // lib.optionalAttrs (cfg.log != null) { StandardErrorPath = cfg.log; };
             environment.variables.SSH_AUTH_SOCK = cfg.socket;
           };
         };
