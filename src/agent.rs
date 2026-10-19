@@ -21,7 +21,19 @@ pub struct Pick {
     pub identities: Vec<Identity>,
     // the client's current directory; for `git push` the client is `ssh`, started in git's directory
     pub cwd: Option<PathBuf>,
+    // the repository in the client's command line, such as `org/repo.git`
+    pub repo: Option<String>,
     pub reply: mpsc::Sender<Option<Identity>>,
+}
+
+// git gives ssh the remote command as one argument, such as `git-upload-pack 'org/repo.git'`;
+// an ssh:// URL gives the path with a leading slash
+fn repository(args: &[String]) -> Option<String> {
+    args.iter().find_map(|arg| {
+        let (command, path) = arg.split_once(' ')?;
+        command.starts_with("git-").then_some(())?;
+        Some(path.trim_matches('\'').trim_start_matches('/').to_string())
+    })
 }
 
 // DRAFT: what the proxy asks of the UI
@@ -57,7 +69,11 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
             return Err(e);
         }
     };
-    let cwd = crate::macos::peer_cwd(&client);
+    let pid = crate::macos::peer_pid(&client);
+    let cwd = pid.and_then(crate::macos::cwd);
+    let args = pid.and_then(crate::macos::args);
+    let repo = args.as_deref().and_then(repository);
+    eprintln!("whoami: client pid {pid:?} in {cwd:?} for repository {repo:?}, args {args:?}");
     let mut chosen: Option<Vec<u8>> = None;
     while let Some(request) = read_frame(&mut client)? {
         let kind = request.first().copied();
@@ -80,6 +96,7 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
                     .send(Request::Pick(Pick {
                         identities,
                         cwd: cwd.clone(),
+                        repo: repo.clone(),
                         reply: tx,
                     }))
                     .map_err(|_| io::Error::other("ui is gone"))?;

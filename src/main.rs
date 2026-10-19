@@ -12,9 +12,10 @@ mod macos;
 // one `git push` can open several agent connections; reuse a fresh choice for them
 const REMEMBER: Duration = Duration::from_secs(10);
 
-// the key for a directory, from `<directory prefix>=<key>` lines in ~/.ssh/whoami.cfg;
-// the longest matching prefix wins, and the last of equal ones
-fn rule_for(cwd: &Path) -> Option<String> {
+// the key for a client, from lines in ~/.ssh/whoami.cfg: `<directory prefix>=<key>` matches
+// the client's directory, and `repo:<repository prefix>=<key>` matches its repository;
+// a repository rule wins over a directory rule, then the longest prefix, then the last line
+fn rule_for(cwd: Option<&Path>, repo: Option<&str>) -> Option<String> {
     let Ok(home) = std::env::var("HOME") else {
         eprintln!("whoami: rules: HOME is not set");
         return None;
@@ -27,9 +28,11 @@ fn rule_for(cwd: &Path) -> Option<String> {
             return None;
         }
     };
-    eprintln!("whoami: rules: {} for {}", path.display(), cwd.display());
-    let cwd = cwd.as_os_str().as_bytes();
-    let mut best: Option<(String, &str)> = None;
+    eprintln!(
+        "whoami: rules: {} for {cwd:?} and repository {repo:?}",
+        path.display()
+    );
+    let mut best: Option<((bool, usize), &str, &str)> = None;
     for (n, line) in config.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -38,27 +41,37 @@ fn rule_for(cwd: &Path) -> Option<String> {
             eprintln!("whoami: rules: line {}: no '=', skipped: {line:?}", n + 1);
             continue;
         };
-        let dir = dir.trim();
-        let dir = match dir.strip_prefix('~') {
-            Some(rest) => format!("{home}{rest}"),
-            None => dir.to_string(),
+        let (rule, key) = (dir.trim(), key.trim());
+        let (rank, prefix, matches) = match rule.strip_prefix("repo:") {
+            Some(prefix) => (
+                (true, prefix.len()),
+                prefix.to_string(),
+                repo.is_some_and(|repo| repo.starts_with(prefix)),
+            ),
+            None => {
+                let prefix = match rule.strip_prefix('~') {
+                    Some(rest) => format!("{home}{rest}"),
+                    None => rule.to_string(),
+                };
+                let matches = cwd
+                    .is_some_and(|cwd| cwd.as_os_str().as_bytes().starts_with(prefix.as_bytes()));
+                ((false, prefix.len()), prefix, matches)
+            }
         };
-        let key = key.trim();
-        let matches = cwd.starts_with(dir.as_bytes());
         eprintln!(
-            "whoami: rules: line {}: {dir:?} = {key:?}{}",
+            "whoami: rules: line {}: {rule:?} as {prefix:?} = {key:?}{}",
             n + 1,
             if matches { ", matches" } else { "" }
         );
-        if matches && best.as_ref().is_none_or(|(b, _)| dir.len() >= b.len()) {
-            best = Some((dir, key));
+        if matches && best.as_ref().is_none_or(|(b, _, _)| rank >= *b) {
+            best = Some((rank, rule, key));
         }
     }
     match &best {
-        Some((dir, key)) => eprintln!("whoami: rules: {dir:?} chooses {key:?}"),
+        Some((_, rule, key)) => eprintln!("whoami: rules: {rule:?} chooses {key:?}"),
         None => eprintln!("whoami: rules: no rule matches"),
     }
-    best.map(|(_, key)| key.to_string())
+    best.map(|(_, _, key)| key.to_string())
 }
 
 // a rule names a key by its fingerprint, as `ssh-add -l` prints it, or else by its comment
@@ -147,16 +160,21 @@ fn main() {
                     error = Some("ssh-agent not available");
                 }
                 Ok(agent::Request::Pick(mut pick)) => {
-                    let ruled = pick.cwd.as_deref().and_then(rule_for).and_then(|key| {
-                        let found = pick.identities.iter().position(|i| names(&key, i));
-                        if found.is_none() {
-                            eprintln!("whoami: rules: the agent has no key {key:?}, only:");
-                            for i in &pick.identities {
-                                eprintln!("whoami:   {} {}", fingerprint(&i.key_blob), i.comment);
+                    let ruled =
+                        rule_for(pick.cwd.as_deref(), pick.repo.as_deref()).and_then(|key| {
+                            let found = pick.identities.iter().position(|i| names(&key, i));
+                            if found.is_none() {
+                                eprintln!("whoami: rules: the agent has no key {key:?}, only:");
+                                for i in &pick.identities {
+                                    eprintln!(
+                                        "whoami:   {} {}",
+                                        fingerprint(&i.key_blob),
+                                        i.comment
+                                    );
+                                }
                             }
-                        }
-                        found
-                    });
+                            found
+                        });
                     let remembered = last
                         .as_ref()
                         .filter(|(_, at)| at.elapsed() < REMEMBER)
@@ -165,7 +183,11 @@ fn main() {
                         });
                     match ruled.or(remembered) {
                         Some(i) => {
-                            let how = if ruled.is_some() { "rule" } else { "last choice" };
+                            let how = if ruled.is_some() {
+                                "rule"
+                            } else {
+                                "last choice"
+                            };
                             eprintln!("whoami: offers {:?} by {how}", pick.identities[i].comment);
                             let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
                         }
