@@ -1,5 +1,7 @@
 use raylib::ffi::CSSPalette;
 use raylib::prelude::*;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -8,6 +10,28 @@ mod macos;
 
 // one `git push` can open several agent connections; reuse a fresh choice for them
 const REMEMBER: Duration = Duration::from_secs(10);
+
+// the key comment for a directory, from `<directory prefix>=<key comment>` lines in
+// ~/.ssh/whoami.cfg; the longest matching prefix wins
+fn rule_for(cwd: &Path) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let config = std::fs::read_to_string(Path::new(&home).join(".ssh/whoami.cfg")).ok()?;
+    let cwd = cwd.as_os_str().as_bytes();
+    config
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(dir, key)| {
+            let dir = dir.trim();
+            let dir = match dir.strip_prefix('~') {
+                Some(rest) => format!("{home}{rest}"),
+                None => dir.to_string(),
+            };
+            (dir, key.trim())
+        })
+        .filter(|(dir, _)| cwd.starts_with(dir.as_bytes()))
+        .max_by_key(|(dir, _)| dir.len())
+        .map(|(_, key)| key.to_string())
+}
 
 fn main() {
     let upstream = std::env::var("WHOAMI_UPSTREAM")
@@ -73,13 +97,16 @@ fn main() {
                     error = Some("ssh-agent not available");
                 }
                 Ok(agent::Request::Pick(mut pick)) => {
+                    let ruled = pick.cwd.as_deref().and_then(rule_for).and_then(|comment| {
+                        pick.identities.iter().position(|i| i.comment == comment)
+                    });
                     let remembered = last
                         .as_ref()
                         .filter(|(_, at)| at.elapsed() < REMEMBER)
                         .and_then(|(key, _)| {
                             pick.identities.iter().position(|i| &i.key_blob == key)
                         });
-                    match remembered {
+                    match ruled.or(remembered) {
                         Some(i) => {
                             let _ = pick.reply.send(Some(pick.identities.swap_remove(i)));
                         }

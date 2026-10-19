@@ -1,7 +1,11 @@
 // AppKit calls raylib does not expose, sent through the Objective-C runtime.
 // objc_msgSend must be cast to the exact signature of each message before calling it.
-use std::ffi::{CStr, c_void};
+use std::ffi::{CStr, OsStr, c_void};
 use std::mem::transmute;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 
 type Id = *mut c_void;
 
@@ -10,6 +14,53 @@ unsafe extern "C" {
     fn objc_getClass(name: *const i8) -> Id;
     fn sel_registerName(name: *const i8) -> Id;
     fn objc_msgSend();
+}
+
+unsafe extern "C" {
+    fn getsockopt(socket: i32, level: i32, name: i32, value: *mut c_void, len: *mut u32) -> i32;
+    fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut c_void, size: i32) -> i32;
+}
+
+// the current directory of the process on the other end of a Unix socket
+pub fn peer_cwd(socket: &UnixStream) -> Option<PathBuf> {
+    const SOL_LOCAL: i32 = 0;
+    const LOCAL_PEERPID: i32 = 0x002;
+    const PROC_PIDVNODEPATHINFO: i32 = 9;
+    // struct proc_vnodepathinfo starts with pvi_cdir, a vnode_info_path:
+    // a 152-byte vnode_info, then the path in a MAXPATHLEN buffer
+    const PATH_OFFSET: usize = 152;
+    const MAXPATHLEN: usize = 1024;
+    const SIZE: usize = 2 * (PATH_OFFSET + MAXPATHLEN);
+
+    let mut pid: i32 = 0;
+    let mut len = size_of::<i32>() as u32;
+    let r = unsafe {
+        getsockopt(
+            socket.as_raw_fd(),
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &mut len,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    let mut info = [0u8; SIZE];
+    let n = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            SIZE as i32,
+        )
+    };
+    if n as usize != SIZE {
+        return None;
+    }
+    let path = CStr::from_bytes_until_nul(&info[PATH_OFFSET..PATH_OFFSET + MAXPATHLEN]).ok()?;
+    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
 }
 
 unsafe fn app() -> Id {

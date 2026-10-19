@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
@@ -19,6 +19,8 @@ pub fn listen(socket: &Path) -> io::Result<UnixListener> {
 // a key list waiting for the user; the UI answers on `reply` with the chosen identity, or None on cancel
 pub struct Pick {
     pub identities: Vec<Identity>,
+    // the client's current directory; for `git push` the client is `ssh`, started in git's directory
+    pub cwd: Option<PathBuf>,
     pub reply: mpsc::Sender<Option<Identity>>,
 }
 
@@ -55,6 +57,7 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
             return Err(e);
         }
     };
+    let cwd = crate::macos::peer_cwd(&client);
     let mut chosen: Option<Vec<u8>> = None;
     while let Some(request) = read_frame(&mut client)? {
         let kind = request.first().copied();
@@ -76,6 +79,7 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
                 picks
                     .send(Request::Pick(Pick {
                         identities,
+                        cwd: cwd.clone(),
                         reply: tx,
                     }))
                     .map_err(|_| io::Error::other("ui is gone"))?;
