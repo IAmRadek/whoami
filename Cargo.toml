@@ -10,3 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 raylib = { version = "6.0.0" }
+sha2 = "0.11.1"

@@ -1,5 +1,6 @@
 use raylib::ffi::CSSPalette;
 use raylib::prelude::*;
+use sha2::{Digest, Sha256};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::mpsc;
@@ -11,8 +12,8 @@ mod macos;
 // one `git push` can open several agent connections; reuse a fresh choice for them
 const REMEMBER: Duration = Duration::from_secs(10);
 
-// the key comment for a directory, from `<directory prefix>=<key comment>` lines in
-// ~/.ssh/whoami.cfg; the longest matching prefix wins
+// the key for a directory, from `<directory prefix>=<key>` lines in ~/.ssh/whoami.cfg;
+// the longest matching prefix wins
 fn rule_for(cwd: &Path) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let config = std::fs::read_to_string(Path::new(&home).join(".ssh/whoami.cfg")).ok()?;
@@ -31,6 +32,28 @@ fn rule_for(cwd: &Path) -> Option<String> {
         .filter(|(dir, _)| cwd.starts_with(dir.as_bytes()))
         .max_by_key(|(dir, _)| dir.len())
         .map(|(_, key)| key.to_string())
+}
+
+// a rule names a key by its fingerprint, as `ssh-add -l` prints it, or else by its comment
+fn names(key: &str, identity: &agent::Identity) -> bool {
+    if key.starts_with("SHA256:") {
+        key == fingerprint(&identity.key_blob)
+    } else {
+        key == identity.comment
+    }
+}
+
+// SHA256:, then the hash of the key blob in base64 with no padding
+fn fingerprint(key_blob: &[u8]) -> String {
+    const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::from("SHA256:");
+    for chunk in Sha256::digest(key_blob).chunks(3) {
+        let n = chunk.iter().fold(0u32, |n, &b| n << 8 | b as u32) << (8 * (3 - chunk.len()));
+        for i in 0..=chunk.len() {
+            out.push(BASE64[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 fn main() {
@@ -97,8 +120,8 @@ fn main() {
                     error = Some("ssh-agent not available");
                 }
                 Ok(agent::Request::Pick(mut pick)) => {
-                    let ruled = pick.cwd.as_deref().and_then(rule_for).and_then(|comment| {
-                        pick.identities.iter().position(|i| i.comment == comment)
+                    let ruled = pick.cwd.as_deref().and_then(rule_for).and_then(|key| {
+                        pick.identities.iter().position(|i| names(&key, i))
                     });
                     let remembered = last
                         .as_ref()
