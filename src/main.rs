@@ -123,7 +123,7 @@ fn main() {
     rl.set_exit_key(None);
     rl.set_target_fps(60);
     let monitor = get_current_monitor();
-    let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 260);
+    let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 300);
     rl.set_window_size(width, height);
     rl.set_window_position(
         (get_monitor_width(monitor) - width) / 2,
@@ -274,20 +274,33 @@ fn main() {
 
         let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
         let header = sh * 0.25;
-        let h = (sh - header) * 0.6;
+        // the values rules match on, written as a rule in ~/.ssh/whoami.cfg would write them
+        let info_h = sh * 0.12;
+        let h = (sh - header - info_h) * 0.6;
         let w = h * 1.25;
         let gap = w * 0.2;
         let x0 = (sw - (n as f32 * w + (n - 1) as f32 * gap)) / 2.0;
-        let y = header + (sh - header - h) / 2.0;
+        let y = header + info_h + (sh - header - info_h - h) / 2.0;
 
         let title = "SELECT SSH KEY";
         let font_size = (header * 0.4) as i32;
         let title_w = rl.measure_text(title, font_size) as f32;
 
+        let dir = pick.cwd.as_deref().map_or("-".to_string(), |cwd| {
+            let cwd = cwd.display().to_string();
+            match std::env::var("HOME") {
+                Ok(home) if cwd.starts_with(&home) => format!("~{}", &cwd[home.len()..]),
+                _ => cwd,
+            }
+        });
+        let info = format!("dir {dir}    repo {}", pick.repo.as_deref().unwrap_or("-"));
+        let info_size = (info_h * 0.5) as i32;
+        let info_w = rl.measure_text(&info, info_size) as f32;
+
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::TRANSPARENT);
         // roundness is relative to the shorter side, so scale it to match the cards' corner radius
-        let panel_w = (n + 1) as f32 * (w + gap);
+        let panel_w = ((n + 1) as f32 * (w + gap)).max(info_w + 2.0 * gap).min(sw);
         let panel = Rectangle::new((sw - panel_w) / 2.0, 0.0, panel_w, sh);
         d.draw_rectangle_rounded(panel, 0.08 * h / sh, 16, Color::new(10, 12, 10, 255));
         d.draw_text(
@@ -296,6 +309,13 @@ fn main() {
             ((header - font_size as f32) / 1.3) as i32,
             font_size,
             Color::new(51, 255, 102, 255),
+        );
+        d.draw_text(
+            &info,
+            ((sw - info_w) / 2.0) as i32,
+            (header + (info_h - info_size as f32) / 2.0) as i32,
+            info_size,
+            Color::new(51, 255, 102, 160),
         );
 
         for (i, identity) in identities.iter().enumerate() {
