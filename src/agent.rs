@@ -23,7 +23,42 @@ pub struct Pick {
     pub cwd: Option<PathBuf>,
     // the repository in the client's command line, such as `org/repo.git`
     pub repo: Option<String>,
+    // the host in an ssh client's destination, such as `github.com`, or the alias from ~/.ssh/config
+    pub host: Option<String>,
     pub reply: mpsc::Sender<Option<Identity>>,
+}
+
+// ssh's options that take a value, from its usage text
+const SSH_OPTIONS_WITH_VALUE: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+
+// the destination is ssh's first argument after the options: `[user@]host` or
+// `ssh://[user@]host[:port][/path]`; the user and port are dropped
+fn host(args: &[String]) -> Option<String> {
+    let (program, args) = args.split_first()?;
+    (Path::new(program).file_name()? == "ssh").then_some(())?;
+    let mut args = args.iter();
+    let destination = loop {
+        let arg = args.next()?;
+        if arg == "--" {
+            break args.next()?;
+        }
+        let Some(flags) = arg.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            break arg;
+        };
+        // flags combine as in `-xp22` or `-xp 22`; a flag with a value takes the rest or the next argument
+        if let Some(i) = flags.find(|c| SSH_OPTIONS_WITH_VALUE.contains(c))
+            && i + 1 == flags.len()
+        {
+            args.next()?;
+        }
+    };
+    let destination = destination.strip_prefix("ssh://").unwrap_or(destination);
+    let destination = destination.split('/').next()?;
+    let host = destination
+        .rsplit_once('@')
+        .map_or(destination, |(_, host)| host);
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 // git gives ssh the remote command as one argument, such as `git-upload-pack 'org/repo.git'`;
@@ -73,7 +108,10 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
     let cwd = pid.and_then(crate::macos::cwd);
     let args = pid.and_then(crate::macos::args);
     let repo = args.as_deref().and_then(repository);
-    eprintln!("whoami: client pid {pid:?} in {cwd:?} for repository {repo:?}, args {args:?}");
+    let host = args.as_deref().and_then(host);
+    eprintln!(
+        "whoami: client pid {pid:?} in {cwd:?} for host {host:?} and repository {repo:?}, args {args:?}"
+    );
     let mut chosen: Option<Vec<u8>> = None;
     while let Some(request) = read_frame(&mut client)? {
         let kind = request.first().copied();
@@ -97,6 +135,7 @@ fn proxy(mut client: UnixStream, upstream: &str, picks: &mpsc::Sender<Request>) 
                         identities,
                         cwd: cwd.clone(),
                         repo: repo.clone(),
+                        host: host.clone(),
                         reply: tx,
                     }))
                     .map_err(|_| io::Error::other("ui is gone"))?;

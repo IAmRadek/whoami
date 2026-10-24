@@ -13,9 +13,10 @@ mod macos;
 const REMEMBER: Duration = Duration::from_secs(10);
 
 // the key for a client, from lines in ~/.ssh/whoami.cfg: `<directory prefix>=<key>` matches
-// the client's directory, and `repo:<repository prefix>=<key>` matches its repository;
-// a repository rule wins over a directory rule, then the longest prefix, then the last line
-fn rule_for(cwd: Option<&Path>, repo: Option<&str>) -> Option<String> {
+// the client's directory, `repo:<repository prefix>=<key>` matches its repository, and
+// `host:<host prefix>=<key>` matches its ssh host; the most specific kind wins, a directory
+// over a repository over a host, then the longest prefix, then the last line
+fn rule_for(cwd: Option<&Path>, repo: Option<&str>, host: Option<&str>) -> Option<String> {
     let Ok(home) = std::env::var("HOME") else {
         eprintln!("whoami: rules: HOME is not set");
         return None;
@@ -29,10 +30,10 @@ fn rule_for(cwd: Option<&Path>, repo: Option<&str>) -> Option<String> {
         }
     };
     eprintln!(
-        "whoami: rules: {} for {cwd:?} and repository {repo:?}",
+        "whoami: rules: {} for {cwd:?}, repository {repo:?} and host {host:?}",
         path.display()
     );
-    let mut best: Option<((bool, usize), &str, &str)> = None;
+    let mut best: Option<((u8, usize), &str, &str)> = None;
     for (n, line) in config.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -42,20 +43,26 @@ fn rule_for(cwd: Option<&Path>, repo: Option<&str>) -> Option<String> {
             continue;
         };
         let (rule, key) = (dir.trim(), key.trim());
-        let (rank, prefix, matches) = match rule.strip_prefix("repo:") {
-            Some(prefix) => (
-                (true, prefix.len()),
+        let (rank, prefix, matches) = match (rule.strip_prefix("repo:"), rule.strip_prefix("host:"))
+        {
+            (Some(prefix), _) => (
+                (1, prefix.len()),
                 prefix.to_string(),
                 repo.is_some_and(|repo| repo.starts_with(prefix)),
             ),
-            None => {
+            (_, Some(prefix)) => (
+                (0, prefix.len()),
+                prefix.to_string(),
+                host.is_some_and(|host| host.starts_with(prefix)),
+            ),
+            (None, None) => {
                 let prefix = match rule.strip_prefix('~') {
                     Some(rest) => format!("{home}{rest}"),
                     None => rule.to_string(),
                 };
                 let matches = cwd
                     .is_some_and(|cwd| cwd.as_os_str().as_bytes().starts_with(prefix.as_bytes()));
-                ((false, prefix.len()), prefix, matches)
+                ((2, prefix.len()), prefix, matches)
             }
         };
         eprintln!(
@@ -123,12 +130,31 @@ fn main() {
     rl.set_exit_key(None);
     rl.set_target_fps(60);
     let monitor = get_current_monitor();
-    let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 300);
+    let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 340);
     rl.set_window_size(width, height);
     rl.set_window_position(
         (get_monitor_width(monitor) - width) / 2,
         (get_monitor_height(monitor) - height) / 2,
     );
+    // Doto, a dot-matrix font under the OFL (src/font/OFL.txt), built into the binary;
+    // loaded at twice the drawn size for the high-DPI framebuffer
+    let font = rl
+        .load_font_from_memory(
+            &thread,
+            ".ttf",
+            include_bytes!("font/static/Doto-Bold.ttf"),
+            40,
+            None,
+        )
+        .map(|font| {
+            font.texture()
+                .set_texture_filter(&thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+            font.make_weak()
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("whoami: font: {e}, drawing with raylib's default");
+            rl.get_font_default()
+        });
 
     let mut pending: Option<agent::Pick> = None;
     let mut error: Option<&str> = None;
@@ -139,6 +165,8 @@ fn main() {
     // set where the cards are drawn and confirmed on the next frame
     let mut clicked = false;
     let mut progress = Vec::new();
+    // when the picker last appeared, for the prompt typing out
+    let mut shown = Instant::now();
 
     while !rl.window_should_close() {
         // the first frames after a wait for the proxy report the whole wait
@@ -160,21 +188,21 @@ fn main() {
                     error = Some("ssh-agent not available");
                 }
                 Ok(agent::Request::Pick(mut pick)) => {
-                    let ruled =
-                        rule_for(pick.cwd.as_deref(), pick.repo.as_deref()).and_then(|key| {
-                            let found = pick.identities.iter().position(|i| names(&key, i));
-                            if found.is_none() {
-                                eprintln!("whoami: rules: the agent has no key {key:?}, only:");
-                                for i in &pick.identities {
-                                    eprintln!(
-                                        "whoami:   {} {}",
-                                        fingerprint(&i.key_blob),
-                                        i.comment
-                                    );
-                                }
+                    let ruled = rule_for(
+                        pick.cwd.as_deref(),
+                        pick.repo.as_deref(),
+                        pick.host.as_deref(),
+                    )
+                    .and_then(|key| {
+                        let found = pick.identities.iter().position(|i| names(&key, i));
+                        if found.is_none() {
+                            eprintln!("whoami: rules: the agent has no key {key:?}, only:");
+                            for i in &pick.identities {
+                                eprintln!("whoami:   {} {}", fingerprint(&i.key_blob), i.comment);
                             }
-                            found
-                        });
+                        }
+                        found
+                    });
                     let remembered = last
                         .as_ref()
                         .filter(|(_, at)| at.elapsed() < REMEMBER)
@@ -205,6 +233,7 @@ fn main() {
                             });
                             selected = 0;
                             progress = vec![0.0f32; pick.identities.len()];
+                            shown = Instant::now();
                             pending = Some(pick);
                         }
                     }
@@ -272,20 +301,29 @@ fn main() {
         let moved = delta.x != 0.0 || delta.y != 0.0;
         let click = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
 
-        let (sw, sh) = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
-        let header = sh * 0.25;
+        const GREEN: Color = Color::new(51, 255, 102, 255);
+        const DIM: Color = Color::new(51, 255, 102, 120);
+        let sw = rl.get_screen_width() as f32;
+        let sh = rl.get_screen_height() as f32;
+        let size = 20.0;
+        let line = size * 1.4;
+        let pad = size * 1.2;
+        let measure = |text: &str| font.measure_text(text, size, 0.0).x;
+        let since = shown.elapsed().as_secs_f32();
+
+        let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+        let prompt = format!("{user}@whoami:~$ ");
+        let command = "select-key";
+        // the command types out at 50 characters a second, then the rest of the screen appears
+        let typed = ((since * 50.0) as usize).min(command.len());
+        let done = typed == command.len();
+        let cursor = if (since * 2.0) as u32 % 2 == 0 {
+            "_"
+        } else {
+            ""
+        };
+
         // the values rules match on, written as a rule in ~/.ssh/whoami.cfg would write them
-        let info_h = sh * 0.12;
-        let h = (sh - header - info_h) * 0.6;
-        let w = h * 1.25;
-        let gap = w * 0.2;
-        let x0 = (sw - (n as f32 * w + (n - 1) as f32 * gap)) / 2.0;
-        let y = header + info_h + (sh - header - info_h - h) / 2.0;
-
-        let title = "SELECT SSH KEY";
-        let font_size = (header * 0.4) as i32;
-        let title_w = rl.measure_text(title, font_size) as f32;
-
         let dir = pick.cwd.as_deref().map_or("-".to_string(), |cwd| {
             let cwd = cwd.display().to_string();
             match std::env::var("HOME") {
@@ -293,75 +331,114 @@ fn main() {
                 _ => cwd,
             }
         });
-        let info = format!("dir {dir}    repo {}", pick.repo.as_deref().unwrap_or("-"));
-        let info_size = (info_h * 0.5) as i32;
-        let info_w = rl.measure_text(&info, info_size) as f32;
+        let rows = [
+            ("dir", dir.as_str()),
+            ("host", pick.host.as_deref().unwrap_or("-")),
+            ("repo", pick.repo.as_deref().unwrap_or("-")),
+        ];
+        let hint = "tab/arrows move    enter select    esc cancel";
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::TRANSPARENT);
-        // roundness is relative to the shorter side, so scale it to match the cards' corner radius
-        let panel_w = ((n + 1) as f32 * (w + gap)).max(info_w + 2.0 * gap).min(sw);
+
+        let column = measure("host  ");
+        let gap = measure("   ");
+        // laid out by the selected form, so moving the selection keeps every key in place
+        let widths: Vec<f32> = identities
+            .iter()
+            .map(|i| measure(&format!("[>{}<]", i.comment)))
+            .collect();
+        let content_w = [
+            measure(&format!("{prompt}{command}_")),
+            rows.iter()
+                .map(|(_, value)| column + measure(value))
+                .fold(0.0, f32::max),
+            widths.iter().sum::<f32>() + (n - 1) as f32 * gap,
+            measure(hint),
+        ]
+        .into_iter()
+        .fold(0.0, f32::max);
+        let panel_w = (content_w + 2.0 * pad).min(sw);
         let panel = Rectangle::new((sw - panel_w) / 2.0, 0.0, panel_w, sh);
-        d.draw_rectangle_rounded(panel, 0.08 * h / sh, 16, Color::new(10, 12, 10, 255));
-        d.draw_text(
-            title,
-            ((sw - title_w) / 2.0) as i32,
-            ((header - font_size as f32) / 1.3) as i32,
-            font_size,
-            Color::new(51, 255, 102, 255),
+        d.draw_rectangle_rec(panel, Color::new(10, 12, 10, 255));
+        d.draw_rectangle_lines_ex(panel, 1.0, DIM);
+
+        let x = panel.x + pad;
+        let mut y = pad;
+        d.draw_text_ex(&font, &prompt, Vector2::new(x, y), size, 0.0, DIM);
+        d.draw_text_ex(
+            &font,
+            &format!("{}{cursor}", &command[..typed]),
+            Vector2::new(x + measure(&prompt), y),
+            size,
+            0.0,
+            GREEN,
         );
-        d.draw_text(
-            &info,
-            ((sw - info_w) / 2.0) as i32,
-            (header + (info_h - info_size as f32) / 2.0) as i32,
-            info_size,
-            Color::new(51, 255, 102, 160),
-        );
 
-        for (i, identity) in identities.iter().enumerate() {
-            let mut rec = Rectangle::new(x0 + i as f32 * (w + gap), y, w, h);
-
-            let dir = if i == selected { 1.0 } else { -1.0 };
-            progress[i] = (progress[i] + dir * dt / 0.2).clamp(0.0, 1.0);
-            let p = progress[i];
-            let eased = if p < 0.5 {
-                4.0 * p * p * p
-            } else {
-                1.0 - (-2.0 * p + 2.0).powi(3) / 2.0
-            }; // ease-in-out cubic
-            let scale = 1.0 + 0.2 * eased;
-
-            rec.x -= w * (scale - 1.0) / 2.0;
-            rec.y -= h * (scale - 1.0) / 2.0;
-            rec.width *= scale;
-            rec.height *= scale;
-
-            let over = (rec.x..rec.x + rec.width).contains(&mouse.x)
-                && (rec.y..rec.y + rec.height).contains(&mouse.y);
-            if over && (moved || click) {
-                selected = i;
-            }
-            if over && click {
-                clicked = true;
+        if done {
+            y += 1.5 * line;
+            for (label, value) in rows {
+                d.draw_text_ex(&font, label, Vector2::new(x, y), size, 0.0, DIM);
+                d.draw_text_ex(&font, value, Vector2::new(x + column, y), size, 0.0, GREEN);
+                y += line;
             }
 
-            d.draw_rectangle_rounded(rec, 0.08, 16, Color::new(18, 24, 18, 255));
-            d.draw_rectangle_rounded_lines_ex(
-                rec,
-                0.08,
-                16,
-                2.0,
-                Color::new(51, 255, 102, (255.0 * eased) as u8),
-            );
+            y += line;
+            let mut kx = x;
+            for (i, identity) in identities.iter().enumerate() {
+                // three rows tall, with the label in the middle
+                let rec = Rectangle::new(kx - 4.0, y, widths[i] + 8.0, 3.0 * line);
+                kx += widths[i] + gap;
 
-            let label_size = (h * 0.12) as i32;
-            let label_w = d.measure_text(&identity.comment, label_size) as f32;
-            d.draw_text(
-                &identity.comment,
-                (rec.x + (rec.width - label_w) / 2.0) as i32,
-                (rec.y + (rec.height - label_size as f32) / 2.0) as i32,
-                label_size,
-                Color::new(51, 255, 102, 255),
+                let dir = if i == selected { 1.0 } else { -1.0 };
+                progress[i] = (progress[i] + dir * dt / 0.2).clamp(0.0, 1.0);
+                let p = progress[i];
+                let eased = if p < 0.5 {
+                    4.0 * p * p * p
+                } else {
+                    1.0 - (-2.0 * p + 2.0).powi(3) / 2.0
+                }; // ease-in-out cubic
+
+                let over = (rec.x..rec.x + rec.width).contains(&mouse.x)
+                    && (rec.y..rec.y + rec.height).contains(&mouse.y);
+                if over && (moved || click) {
+                    selected = i;
+                }
+                if over && click {
+                    clicked = true;
+                }
+
+                let label = if i == selected {
+                    format!("[>{}<]", identity.comment)
+                } else {
+                    format!("[ {} ]", identity.comment)
+                };
+                d.draw_rectangle_rec(rec, Color::new(51, 255, 102, (50.0 * eased) as u8));
+                d.draw_text_ex(
+                    &font,
+                    &label,
+                    Vector2::new(
+                        rec.x + (rec.width - measure(&label)) / 2.0,
+                        rec.y + (rec.height - size) / 2.0,
+                    ),
+                    size,
+                    0.0,
+                    Color::new(51, 255, 102, (120.0 + 135.0 * eased) as u8),
+                );
+            }
+
+            let hint_at = Vector2::new(x, sh - pad - size);
+            d.draw_text_ex(&font, hint, hint_at, size, 0.0, DIM);
+        }
+
+        // CRT scanlines over the whole panel
+        for row in (0..sh as i32).step_by(3) {
+            d.draw_line(
+                panel.x as i32,
+                row,
+                (panel.x + panel.width) as i32,
+                row,
+                Color::new(0, 0, 0, 60),
             );
         }
     }
