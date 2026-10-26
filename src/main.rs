@@ -83,6 +83,57 @@ fn rule_for(cwd: Option<&Path>, repo: Option<&str>, host: Option<&str>) -> Optio
     best.map(|(_, _, key)| key.to_string())
 }
 
+// the values rules match on, written as a rule in ~/.ssh/whoami.cfg would write them
+fn rows(pick: &agent::Pick) -> [(&'static str, Option<String>); 3] {
+    let dir = pick.cwd.as_deref().map(|cwd| {
+        let cwd = cwd.display().to_string();
+        match std::env::var("HOME") {
+            Ok(home) if cwd.starts_with(&home) => format!("~{}", &cwd[home.len()..]),
+            _ => cwd,
+        }
+    });
+    [
+        ("dir", dir),
+        ("host", pick.host.clone()),
+        ("repo", pick.repo.clone()),
+    ]
+}
+
+// the rule for one of the rows, such as `repo:org/repo.git`; a directory has no kind
+fn rule_from(label: &str, value: &str) -> String {
+    match label {
+        "dir" => value.to_string(),
+        _ => format!("{label}:{value}"),
+    }
+}
+
+// appends `<rule>=<fingerprint> # <comment>` to ~/.ssh/whoami.cfg
+fn add_rule(rule: &str, identity: &agent::Identity) {
+    use std::io::Write;
+    let Ok(home) = std::env::var("HOME") else {
+        eprintln!("whoami: add rule: HOME is not set");
+        return;
+    };
+    let path = Path::new(&home).join(".ssh/whoami.cfg");
+    // a last line with no newline would run into the new one
+    let newline = std::fs::read(&path).is_ok_and(|c| c.last().is_some_and(|&b| b != b'\n'));
+    let line = format!(
+        "{}{rule}={} # {}\n",
+        if newline { "\n" } else { "" },
+        fingerprint(&identity.key_blob),
+        identity.comment
+    );
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    match written {
+        Ok(()) => eprintln!("whoami: add rule: {}: {:?}", path.display(), line.trim()),
+        Err(e) => eprintln!("whoami: add rule: {}: {e}", path.display()),
+    }
+}
+
 // a rule names a key by its fingerprint, as `ssh-add -l` prints it, or else by its comment
 fn names(key: &str, identity: &agent::Identity) -> bool {
     if key.starts_with("SHA256:") {
@@ -164,6 +215,8 @@ fn main() {
     // key blobs, most recently chosen first
     let mut recent: Vec<Vec<u8>> = Vec::new();
     let mut selected = 0;
+    // the row to write a rule for when a key is chosen
+    let mut rule: Option<usize> = None;
     // set where the cards are drawn and confirmed on the next frame
     let mut clicked = false;
     let mut progress = Vec::new();
@@ -234,6 +287,7 @@ fn main() {
                                     .unwrap_or(usize::MAX)
                             });
                             selected = 0;
+                            rule = None;
                             progress = vec![0.0f32; pick.identities.len()];
                             shown = Instant::now();
                             pending = Some(pick);
@@ -247,8 +301,15 @@ fn main() {
         let enter = rl.is_key_pressed(KeyboardKey::KEY_ENTER) || std::mem::take(&mut clicked);
         if enter || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
             if let Some(mut pick) = pending.take() {
+                let new_rule = rule.and_then(|r| {
+                    let (label, value) = &rows(&pick)[r];
+                    value.as_deref().map(|value| rule_from(label, value))
+                });
                 let identity = enter.then(|| pick.identities.swap_remove(selected));
                 if let Some(identity) = &identity {
+                    if let Some(new_rule) = &new_rule {
+                        add_rule(new_rule, identity);
+                    }
                     last = Some((identity.key_blob.clone(), Instant::now()));
                     recent.retain(|k| k != &identity.key_blob);
                     recent.insert(0, identity.key_blob.clone());
@@ -297,6 +358,18 @@ fn main() {
         if rl.is_key_pressed(KeyboardKey::KEY_LEFT) {
             selected = (selected + n - 1) % n;
         }
+        let rows = rows(pick);
+        // up and down step through no row, then each row with a value, and wrap around
+        let choices: Vec<Option<usize>> = std::iter::once(None)
+            .chain((0..rows.len()).filter(|&r| rows[r].1.is_some()).map(Some))
+            .collect();
+        let at = choices.iter().position(|&c| c == rule).unwrap_or(0);
+        if rl.is_key_pressed(KeyboardKey::KEY_DOWN) {
+            rule = choices[(at + 1) % choices.len()];
+        }
+        if rl.is_key_pressed(KeyboardKey::KEY_UP) {
+            rule = choices[(at + choices.len() - 1) % choices.len()];
+        }
         let mouse = rl.get_mouse_position();
         let delta = rl.get_mouse_delta();
         // a resting cursor leaves the keyboard highlight alone
@@ -325,25 +398,12 @@ fn main() {
             ""
         };
 
-        // the values rules match on, written as a rule in ~/.ssh/whoami.cfg would write them
-        let dir = pick.cwd.as_deref().map_or("-".to_string(), |cwd| {
-            let cwd = cwd.display().to_string();
-            match std::env::var("HOME") {
-                Ok(home) if cwd.starts_with(&home) => format!("~{}", &cwd[home.len()..]),
-                _ => cwd,
-            }
-        });
-        let rows = [
-            ("dir", dir.as_str()),
-            ("host", pick.host.as_deref().unwrap_or("-")),
-            ("repo", pick.repo.as_deref().unwrap_or("-")),
-        ];
         let hint = "tab/arrows move    enter select    esc cancel";
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::TRANSPARENT);
 
-        let column = measure("host  ");
+        let column = measure("[x] host  ");
         let gap = measure("   ");
         // laid out by the selected form, so moving the selection keeps every key in place
         let widths: Vec<f32> = identities
@@ -353,7 +413,7 @@ fn main() {
         let content_w = [
             measure(&format!("{prompt}{command}_")),
             rows.iter()
-                .map(|(_, value)| column + measure(value))
+                .map(|(_, value)| column + measure(value.as_deref().unwrap_or("-")))
                 .fold(0.0, f32::max),
             widths.iter().sum::<f32>() + (n - 1) as f32 * gap,
             measure(hint),
@@ -379,9 +439,36 @@ fn main() {
 
         if done {
             y += 1.5 * line;
-            for (label, value) in rows {
-                d.draw_text_ex(&font, label, Vector2::new(x, y), size, 0.0, DIM);
-                d.draw_text_ex(&font, value, Vector2::new(x + column, y), size, 0.0, GREEN);
+            for (r, (label, value)) in rows.iter().enumerate() {
+                // the whole row is the hit area, one line tall around the text
+                let rec = Rectangle::new(x - 4.0, y - (line - size) / 2.0, content_w + 8.0, line);
+                let over = (rec.x..rec.x + rec.width).contains(&mouse.x)
+                    && (rec.y..rec.y + rec.height).contains(&mouse.y);
+                // a click on the chosen row clears it
+                if over && click && value.is_some() {
+                    rule = if rule == Some(r) { None } else { Some(r) };
+                }
+                let chosen = rule == Some(r);
+                if chosen {
+                    d.draw_rectangle_rec(rec, Color::new(51, 255, 102, 50));
+                }
+                let mark = if chosen { "[x] " } else { "[ ] " };
+                d.draw_text_ex(
+                    &font,
+                    &format!("{mark}{label}"),
+                    Vector2::new(x, y),
+                    size,
+                    0.0,
+                    if chosen { GREEN } else { DIM },
+                );
+                d.draw_text_ex(
+                    &font,
+                    value.as_deref().unwrap_or("-"),
+                    Vector2::new(x + column, y),
+                    size,
+                    0.0,
+                    GREEN,
+                );
                 y += line;
             }
 
