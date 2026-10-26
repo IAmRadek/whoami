@@ -15,7 +15,8 @@ const REMEMBER: Duration = Duration::from_secs(10);
 // the key for a client, from lines in ~/.ssh/whoami.cfg: `<directory prefix>=<key>` matches
 // the client's directory, `repo:<repository prefix>=<key>` matches its repository, and
 // `host:<host prefix>=<key>` matches its ssh host; the most specific kind wins, a directory
-// over a repository over a host, then the longest prefix, then the last line
+// over a repository over a host, then the longest prefix, then the last line; a `#` starts a
+// comment that runs to the end of the line
 fn rule_for(cwd: Option<&Path>, repo: Option<&str>, host: Option<&str>) -> Option<String> {
     let Ok(home) = std::env::var("HOME") else {
         eprintln!("whoami: rules: HOME is not set");
@@ -35,6 +36,7 @@ fn rule_for(cwd: Option<&Path>, repo: Option<&str>, host: Option<&str>) -> Optio
     );
     let mut best: Option<((u8, usize), &str, &str)> = None;
     for (n, line) in config.lines().enumerate() {
+        let line = line.split_once('#').map_or(line, |(rule, _)| rule);
         if line.trim().is_empty() {
             continue;
         }
