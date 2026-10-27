@@ -182,6 +182,20 @@ fn main() {
     unsafe { macos::move_to_active_space(rl.get_window_handle()) };
     rl.set_exit_key(None);
     rl.set_target_fps(60);
+    // SAFETY: the call stores blend factors in rlgl's global state and makes no GL call; this is
+    // the only thread that touches rlgl, and raylib::init above set that state up. raylib's alpha
+    // blending also scales the window's alpha by the source alpha, so translucent drawing over the
+    // opaque panel lets the desktop through; with these factors alpha adds up over the panel instead
+    unsafe {
+        raylib::ffi::rlSetBlendFactorsSeparate(
+            raylib::ffi::RL_SRC_ALPHA as i32,
+            raylib::ffi::RL_ONE_MINUS_SRC_ALPHA as i32,
+            raylib::ffi::RL_ONE as i32,
+            raylib::ffi::RL_ONE_MINUS_SRC_ALPHA as i32,
+            raylib::ffi::RL_FUNC_ADD as i32,
+            raylib::ffi::RL_FUNC_ADD as i32,
+        )
+    };
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 340);
     rl.set_window_size(width, height);
@@ -402,6 +416,7 @@ fn main() {
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::TRANSPARENT);
+        let mut d = d.begin_blend_mode(BlendMode::BLEND_CUSTOM_SEPARATE);
 
         let column = measure("[x] host  ");
         let gap = measure("   ");
