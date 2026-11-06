@@ -156,6 +156,21 @@ fn fingerprint(key_blob: &[u8]) -> String {
     out
 }
 
+// puts the window in the middle of the screen in use; positions are in points, from the top left
+// of the first screen, so a screen beside or above it has its own origin
+fn center(rl: &mut RaylibHandle, window_w: i32, window_h: i32) {
+    let (x, y, w, h) = macos::active_screen().unwrap_or_else(|| {
+        let monitor = get_current_monitor();
+        let origin = get_monitor_position(monitor);
+        let (w, h) = (get_monitor_width(monitor), get_monitor_height(monitor));
+        (origin.x as f64, origin.y as f64, w as f64, h as f64)
+    });
+    rl.set_window_position(
+        (x + (w - window_w as f64) / 2.0) as i32,
+        (y + (h - window_h as f64) / 2.0) as i32,
+    );
+}
+
 fn main() {
     let upstream = std::env::var("WHOAMI_UPSTREAM")
         .or_else(|_| std::env::var("SSH_AUTH_SOCK"))
@@ -199,10 +214,7 @@ fn main() {
     let monitor = get_current_monitor();
     let (width, height) = ((get_monitor_width(monitor) as f32 * 0.6) as i32, 340);
     rl.set_window_size(width, height);
-    rl.set_window_position(
-        (get_monitor_width(monitor) - width) / 2,
-        (get_monitor_height(monitor) - height) / 2,
-    );
+    center(&mut rl, width, height);
     // Doto, a dot-matrix font under the OFL (src/font/OFL.txt), built into the binary;
     // loaded at twice the drawn size for the high-DPI framebuffer
     let font = rl
@@ -252,6 +264,8 @@ fn main() {
             };
             match request {
                 Ok(agent::Request::Unavailable) => {
+                    // the screen in use may be another one than at the last show
+                    center(&mut rl, width, height);
                     rl.clear_window_state(WindowState::default().set_window_hidden(true));
                     rl.set_window_focused();
                     error = Some("ssh-agent not available");
@@ -290,6 +304,8 @@ fn main() {
                         }
                         None => {
                             eprintln!("whoami: shows the picker");
+                            // the screen in use may be another one than at the last show
+                            center(&mut rl, width, height);
                             rl.clear_window_state(WindowState::default().set_window_hidden(true));
                             rl.set_window_focused();
                             error = None;
